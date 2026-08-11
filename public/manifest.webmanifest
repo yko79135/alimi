@@ -1,0 +1,10 @@
+{
+  "name": "Alimi",
+  "short_name": "Alimi",
+  "description": "School management and parent communication",
+  "start_url": "/app",
+  "display": "standalone",
+  "background_color": "#f7f8fa",
+  "theme_color": "#2f6f5e",
+  "icons": []
+}
