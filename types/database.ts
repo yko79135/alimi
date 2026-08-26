@@ -287,6 +287,8 @@ export type BehaviorRecord = Timestamped & {
   notice_id: string | null;
   batch_id: string | null;
   author_id: string | null;
+  edited_at: string | null;
+  edited_by: string | null;
 };
 
 export type AuditLog = Timestamped & {
@@ -408,7 +410,7 @@ export type Database = {
         Args: { p_student: string; p_from: string; p_to: string };
         Returns: Pick<
           BehaviorRecord,
-          "id" | "student_id" | "category_id" | "kind" | "points" | "occurred_on" | "reason" | "guardian_message" | "notice_id" | "created_at"
+          "id" | "student_id" | "category_id" | "kind" | "points" | "occurred_on" | "reason" | "guardian_message" | "notice_id" | "created_at" | "edited_at"
         >[];
       };
       attendance_current_status: {

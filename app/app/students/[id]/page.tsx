@@ -1,7 +1,8 @@
 import { notFound, redirect } from "next/navigation";
 import { getActiveSchoolContext } from "@/lib/tenant/active-school";
 import { createClient } from "@/lib/supabase/server";
-import type { GradeLevel, Profile } from "@/types/database";
+import type { BehaviorCategory, GradeLevel, Profile } from "@/types/database";
+import { BehaviorRecordsTable } from "./behavior-records-table";
 
 export default async function StudentDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -20,14 +21,20 @@ export default async function StudentDetailPage({ params }: { params: Promise<{ 
 
   if (!student) notFound();
 
-  const [{ data: guardianLinks }, { count: attendanceCount }, { count: behaviorCount }] = await Promise.all([
-    supabase
-      .from("guardian_students")
-      .select("relationship, guardian:profiles(id, full_name, email, phone)")
-      .eq("student_id", id),
-    supabase.from("attendance_entries").select("id", { count: "exact", head: true }).eq("student_id", id),
-    supabase.from("behavior_records").select("id", { count: "exact", head: true }).eq("student_id", id),
-  ]);
+  const [{ data: guardianLinks }, { count: attendanceCount }, { data: behaviorRecords }, { data: behaviorCategories }] =
+    await Promise.all([
+      supabase
+        .from("guardian_students")
+        .select("relationship, guardian:profiles(id, full_name, email, phone)")
+        .eq("student_id", id),
+      supabase.from("attendance_entries").select("id", { count: "exact", head: true }).eq("student_id", id),
+      supabase
+        .from("behavior_records")
+        .select("id, category_id, kind, points, occurred_on, reason, guardian_message, teacher_note, edited_at")
+        .eq("student_id", id)
+        .order("occurred_on", { ascending: false }),
+      supabase.from("behavior_categories").select("*").eq("school_id", school.id).eq("active", true).order("sort_order"),
+    ]);
 
   const grade = (student as unknown as { grade_level: GradeLevel | null }).grade_level;
 
@@ -70,15 +77,19 @@ export default async function StudentDetailPage({ params }: { params: Promise<{ 
         )}
       </section>
 
-      <section className="grid grid-cols-2 gap-4">
-        <div className="rounded-lg border border-line bg-surface p-4">
-          <p className="text-sm text-muted">Attendance entries</p>
-          <p className="mt-1 text-xl font-semibold text-ink">{attendanceCount ?? 0}</p>
-        </div>
-        <div className="rounded-lg border border-line bg-surface p-4">
-          <p className="text-sm text-muted">Behavior records</p>
-          <p className="mt-1 text-xl font-semibold text-ink">{behaviorCount ?? 0}</p>
-        </div>
+      <section className="rounded-lg border border-line bg-surface p-4">
+        <p className="text-sm text-muted">Attendance entries</p>
+        <p className="mt-1 text-xl font-semibold text-ink">{attendanceCount ?? 0}</p>
+      </section>
+
+      <section className="rounded-lg border border-line bg-surface p-5">
+        <h2 className="font-medium text-ink">Behavior records</h2>
+        <p className="mt-1 text-sm text-muted">Click Edit on any row to correct it.</p>
+        <BehaviorRecordsTable
+          schoolId={school.id}
+          records={behaviorRecords ?? []}
+          categories={(behaviorCategories as BehaviorCategory[] | null) ?? []}
+        />
       </section>
     </div>
   );

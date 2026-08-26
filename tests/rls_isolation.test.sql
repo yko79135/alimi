@@ -86,6 +86,10 @@ begin
   insert into public.notices (school_id, title, body, target_scope, created_by) values
     (v_school_a, 'School A wide notice', 'body', 'school', v_admin_a),
     (v_school_b, 'School B wide notice', 'body', 'school', v_admin_b);
+
+  insert into public.behavior_records (id, school_id, student_id, kind, points, delta, reason, author_id) values
+    ('00000000-0000-0000-0000-0000000baa01', v_school_a, v_student_a, 'praise', 2, 2, 'Original reason A', v_admin_a),
+    ('00000000-0000-0000-0000-0000000bbb01', v_school_b, v_student_b, 'praise', 2, 2, 'Original reason B', v_admin_b);
 end $$;
 
 -- ---------------------------------------------------------------------
@@ -161,6 +165,36 @@ select pg_temp.assert_count('parent_a cannot see school B student', count(*), 0)
 select pg_temp.assert_count('parent_a sees school A notice', count(*), 1) from public.notices;
 select pg_temp.assert_count('parent_a cannot see guardian_students rows for other guardians', count(*), 1)
   from public.guardian_students;
+
+reset role;
+
+-- ---------------------------------------------------------------------
+-- School A teacher can edit a behavior_record belonging to School A
+-- (the student-detail "edit" feature), but the same UPDATE against a
+-- School B record affects zero rows rather than leaking cross-tenant
+-- write access.
+-- ---------------------------------------------------------------------
+
+select pg_temp.run_as('00000000-0000-0000-0000-0000000a0002');
+
+do $$
+declare
+  v_updated integer;
+begin
+  update public.behavior_records set reason = 'Corrected reason A'
+  where id = '00000000-0000-0000-0000-0000000baa01';
+  get diagnostics v_updated = row_count;
+  if v_updated <> 1 then
+    raise exception 'ASSERTION FAILED: teacher_a could not edit their own school''s behavior record (% rows)', v_updated;
+  end if;
+
+  update public.behavior_records set reason = 'Should not apply'
+  where id = '00000000-0000-0000-0000-0000000bbb01';
+  get diagnostics v_updated = row_count;
+  if v_updated <> 0 then
+    raise exception 'ASSERTION FAILED: teacher_a was able to edit school B''s behavior record';
+  end if;
+end $$;
 
 reset role;
 
