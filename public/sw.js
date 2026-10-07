@@ -34,3 +34,33 @@ self.addEventListener("notificationclick", (event) => {
     })
   );
 });
+
+// Push services can rotate or expire a subscription at any time (FCM,
+// Mozilla autopush and Apple all do). Without this handler the server
+// keeps the dead endpoint, gets 410 on the next send, deletes it, and the
+// device silently stops receiving notices. Resubscribe with the same key
+// and hand the new endpoint to the server; if this can't complete (e.g.
+// the session cookie has expired), the next visit to the family page
+// re-syncs instead — see lib/push/client.ts.
+self.addEventListener("pushsubscriptionchange", (event) => {
+  event.waitUntil(
+    (async () => {
+      const oldSubscription = event.oldSubscription || null;
+      let newSubscription = event.newSubscription || null;
+      if (!newSubscription) {
+        const applicationServerKey = oldSubscription?.options?.applicationServerKey;
+        if (!applicationServerKey) return;
+        newSubscription = await self.registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey });
+      }
+      await fetch("/api/push/resubscribe", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          oldEndpoint: oldSubscription?.endpoint || null,
+          subscription: newSubscription.toJSON(),
+        }),
+      });
+    })().catch(() => {})
+  );
+});

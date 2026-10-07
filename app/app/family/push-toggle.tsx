@@ -2,18 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
-import { nowIso } from "@/lib/utils/dates";
-
-function pushSupported() {
-  return typeof window !== "undefined" && "serviceWorker" in navigator && "PushManager" in window;
-}
-
-function urlBase64ToUint8Array(base64String: string) {
-  const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
-  const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
-  const rawData = atob(base64);
-  return Uint8Array.from([...rawData].map((c) => c.charCodeAt(0)));
-}
+import { pushSupported, removeThisDevicePushSubscription, syncPushSubscription } from "@/lib/push/client";
 
 export function PushToggle({ schoolId }: { schoolId: string }) {
   // Browser push support doesn't change during the component's lifetime,
@@ -30,48 +19,30 @@ export function PushToggle({ schoolId }: { schoolId: string }) {
   useEffect(() => {
     if (!supported) return;
     let cancelled = false;
-    navigator.serviceWorker.register("/sw.js").then(async (registration) => {
-      const existing = await registration.pushManager.getSubscription();
-      if (!cancelled) setSubscribed(Boolean(existing));
-    });
+    // Re-sync on every visit: a browser subscription alone doesn't mean
+    // the server can still reach this device (see lib/push/client.ts).
+    syncPushSubscription(supabase, schoolId, { createIfMissing: false })
+      .then((ok) => {
+        if (!cancelled) setSubscribed(ok);
+      })
+      .catch(() => {
+        if (!cancelled) setSubscribed(false);
+      });
     return () => {
       cancelled = true;
     };
-  }, [supported]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- supabase is a fresh-but-equivalent client each render
+  }, [supported, schoolId]);
 
   async function enable() {
     setBusy(true);
     setError(null);
     try {
-      const publicKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY;
-      if (!publicKey) {
+      if (!process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY) {
         setError("Push notifications aren't configured for this school yet.");
         return;
       }
-      const registration = await navigator.serviceWorker.register("/sw.js");
-      const subscription = await registration.pushManager.subscribe({
-        userVisibleOnly: true,
-        applicationServerKey: urlBase64ToUint8Array(publicKey),
-      });
-      const json = subscription.toJSON();
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-      if (!user || !json.endpoint || !json.keys) return;
-
-      await supabase.from("push_subscriptions").upsert(
-        {
-          school_id: schoolId,
-          user_id: user.id,
-          endpoint: json.endpoint,
-          p256dh: json.keys.p256dh,
-          auth: json.keys.auth,
-          user_agent: navigator.userAgent,
-          last_seen_at: nowIso(),
-        },
-        { onConflict: "endpoint" }
-      );
-      setSubscribed(true);
+      setSubscribed(await syncPushSubscription(supabase, schoolId, { createIfMissing: true }));
     } catch {
       setError("Could not enable notifications on this device.");
     } finally {
@@ -82,12 +53,7 @@ export function PushToggle({ schoolId }: { schoolId: string }) {
   async function disable() {
     setBusy(true);
     try {
-      const registration = await navigator.serviceWorker.getRegistration();
-      const existing = await registration?.pushManager.getSubscription();
-      if (existing) {
-        await supabase.from("push_subscriptions").delete().eq("endpoint", existing.endpoint);
-        await existing.unsubscribe();
-      }
+      await removeThisDevicePushSubscription(supabase);
       setSubscribed(false);
     } finally {
       setBusy(false);

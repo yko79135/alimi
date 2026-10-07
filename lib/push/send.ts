@@ -16,6 +16,17 @@ function ensureConfigured() {
   return true;
 }
 
+// PostgREST takes `.in()` filters in the URL query string, so a long id
+// list (a school-wide notice to a few hundred families) overflows the
+// URL limit and the request fails. Query in chunks instead.
+const IN_CHUNK = 100;
+const PAGE_SIZE = 1000;
+function chunk<T>(items: T[]): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += IN_CHUNK) out.push(items.slice(i, i + IN_CHUNK));
+  return out;
+}
+
 interface NoticeForPush {
   id: string;
   school_id: string;
@@ -39,13 +50,22 @@ export async function sendNoticePush(notice: NoticeForPush) {
 
   let guardianIds: string[] = [];
   if (notice.target_scope === "school") {
-    const { data } = await admin
-      .from("school_memberships")
-      .select("user_id")
-      .eq("school_id", notice.school_id)
-      .eq("role", "parent")
-      .eq("status", "active");
-    guardianIds = (data ?? []).map((r) => r.user_id);
+    // PostgREST returns at most 1000 rows per request (Supabase's default
+    // max_rows), so page through or every parent past the first 1000
+    // silently never gets a school-wide push.
+    for (let from = 0; ; from += PAGE_SIZE) {
+      const { data, error } = await admin
+        .from("school_memberships")
+        .select("user_id")
+        .eq("school_id", notice.school_id)
+        .eq("role", "parent")
+        .eq("status", "active")
+        .order("id")
+        .range(from, from + PAGE_SIZE - 1);
+      if (error) console.error("push: parent lookup failed", error);
+      guardianIds.push(...(data ?? []).map((r) => r.user_id));
+      if (!data || data.length < PAGE_SIZE) break;
+    }
   } else if (notice.target_scope === "grade" && notice.target_grade_level_id) {
     const { data } = await admin
       .from("guardian_students")
@@ -64,19 +84,26 @@ export async function sendNoticePush(notice: NoticeForPush) {
     const { data } = await admin.from("notice_students").select("student_id").eq("notice_id", notice.id);
     const studentIds = (data ?? []).map((r) => r.student_id);
     if (studentIds.length > 0) {
-      const { data: links } = await admin.from("guardian_students").select("guardian_id").in("student_id", studentIds);
-      guardianIds = Array.from(new Set((links ?? []).map((r) => r.guardian_id)));
+      const ids = new Set<string>();
+      for (const part of chunk(studentIds)) {
+        const { data: links, error } = await admin.from("guardian_students").select("guardian_id").in("student_id", part);
+        if (error) console.error("push: guardian lookup failed", error);
+        (links ?? []).forEach((r) => ids.add(r.guardian_id));
+      }
+      guardianIds = Array.from(ids);
     }
   }
 
   if (guardianIds.length === 0) return { sent: 0, failed: 0 };
 
-  const { data: subscriptions } = await admin
-    .from("push_subscriptions")
-    .select("id, endpoint, p256dh, auth")
-    .in("user_id", guardianIds);
+  const subscriptions: { id: string; endpoint: string; p256dh: string; auth: string }[] = [];
+  for (const part of chunk(guardianIds)) {
+    const { data, error } = await admin.from("push_subscriptions").select("id, endpoint, p256dh, auth").in("user_id", part);
+    if (error) console.error("push: subscription lookup failed", error);
+    subscriptions.push(...(data ?? []));
+  }
 
-  if (!subscriptions || subscriptions.length === 0) return { sent: 0, failed: 0 };
+  if (subscriptions.length === 0) return { sent: 0, failed: 0 };
 
   const payload = JSON.stringify({
     title: "Alimi",
@@ -103,6 +130,10 @@ export async function sendNoticePush(notice: NoticeForPush) {
         const statusCode = (err as { statusCode?: number })?.statusCode;
         if (statusCode === 404 || statusCode === 410) {
           staleIds.push(sub.id);
+        } else {
+          // Anything else (403 VAPID mismatch, 413, 429, 5xx) used to vanish
+          // without a trace; log it so missing notifications are diagnosable.
+          console.error("push: send failed", { subscriptionId: sub.id, statusCode, body: (err as { body?: string })?.body });
         }
       }
     })
